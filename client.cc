@@ -83,7 +83,7 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   timeval start_time, end_time;
   bool test_over = false;
   pthread_barrier_t b;
-  pthread_barrier_init(&b, nullptr, ctx->option.num_thread);
+  pthread_barrier_init(&b, nullptr, ctx->option.num_thread + 1);
 
   // ready for test resource
   struct __ {
@@ -158,12 +158,11 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   // start test threads
   vector<thread> test_th;
   for (int tid = 0; tid < ctx->option.num_thread; ++tid) {
-    test_th.push_back(thread([&test_over, tid, &ctx, &option, &b, &start_time,
+    test_th.push_back(thread([&test_over, tid, &ctx, &b, &start_time,
                               &end_time, &complete_cnt, &resource_th]() {
       int cqid = tid % ctx->ib_stat.cqs.size();
       auto &resource = resource_th[tid % resource_th.size()];
       ibv_send_wr *bad_wr;
-      uint64_t complete_cnt_local = 0;
       ibv_wc *wcs = new ibv_wc[ctx->option.num_poll_entries];
       vector<bool> complete_flags(resource.size(), true);
       for (int i = 0; i < resource.size(); ++i) {
@@ -201,14 +200,18 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
     }));
   }
 
+  pthread_barrier_wait(&b);
   uint64_t last_c = 0, c;
+  timeval last_time;
+  gettimeofday(&last_time, nullptr);
   for (uint32_t d = 0; d < option.duration_s; ++d) {
     usleep(1000000);
     timeval now_time;
     gettimeofday(&now_time, nullptr);
     uint64_t c = vector_sum(complete_cnt, c) - last_c;
-    uint64_t diff = timeval_diff(now_time, start_time);
+    uint64_t diff = timeval_diff(now_time, last_time);
     last_c = c;
+    last_time = now_time;
     result.latency_us.push_back(1.0 * diff / c);
     result.throughput_Mops.push_back(1.0 * c / diff);
     fprintf(stdout, "Thoughput: %f Mops\n", 1.0 * c / diff);

@@ -141,4 +141,10 @@ MasterContext::MasterContext(MasterOption &option) : option(option) {
   }
 }
 
-MasterContext::~MasterContext() { alive = false; }
+MasterContext::~MasterContext() {
+  alive = false;
+  for (int i = 0; i < option.num_thread; ++i) {
+    poll_th[i].join();
+  }
+  listen_th.join();
+}
