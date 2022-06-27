@@ -1,5 +1,10 @@
 #include "common.h"
 
+ uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size,
+                                  size_t payload) {
+  return mr_addr + rand() % (mr_size - payload);
+}
+
 void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           uint8_t gid_idx, int num_thread, bool thread_local_cq,
                           int cqe_depth, size_t mr_size) {
@@ -31,7 +36,7 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
   e_assert(ib_stat.mr != nullptr);
 }
 
-ibv_qp *create_qp(ib_stat_s &ib_stat, uint32_t max_send_wr,
+ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,
                   uint32_t max_recv_wr, uint32_t max_send_sge,
                   uint32_t max_recv_sge) {
   ibv_qp_init_attr qp_init_attr;
@@ -42,8 +47,7 @@ ibv_qp *create_qp(ib_stat_s &ib_stat, uint32_t max_send_wr,
   qp_init_attr.cap.max_recv_wr = max_recv_wr;
   qp_init_attr.cap.max_send_sge = max_send_sge;
   qp_init_attr.cap.max_recv_sge = max_recv_sge;
-  qp_init_attr.recv_cq = qp_init_attr.send_cq =
-      ib_stat.cqs[rand() % ib_stat.cqs.size()];
+  qp_init_attr.recv_cq = qp_init_attr.send_cq = ib_stat.cqs[cqid];
   qp_init_attr.srq = ib_stat.srq;
   ibv_qp *qp = ibv_create_qp(ib_stat.pd, &qp_init_attr);
   e_assert(qp != nullptr);

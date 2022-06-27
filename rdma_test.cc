@@ -7,7 +7,7 @@ int main(int argc, char *argv[]){
     while (1);
   } else {
     ClientOption option;
-    option.qp_num_per_mac = 2;
+    option.num_qp_per_mac = 2;
     option.master_ip.push_back("127.0.0.1");
     ClientContext *ctx = new ClientContext(option);
   }

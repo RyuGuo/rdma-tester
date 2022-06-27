@@ -29,6 +29,7 @@ struct MasterOption {
   int num_thread = 1;
   bool thread_local_cq = true;
   size_t mr_size = 1L << 20;
+  int num_poll_entries = 16;
 
   bool use_srq = false;
   uint32_t max_wr = 16;
@@ -37,8 +38,8 @@ struct MasterOption {
 
   uint32_t max_send_wr = 100;
   uint32_t max_recv_wr = 100;
-  uint32_t max_send_sge = 16;
-  uint32_t max_recv_sge = 16;
+  uint32_t max_send_sge = 1;
+  uint32_t max_recv_sge = 1;
 };
 
 struct ClientOption {
@@ -49,7 +50,8 @@ struct ClientOption {
   uint8_t ib_port = 1;
   uint8_t gid_idx = 1;
   int cqe_depth = 100;
-  int qp_num_per_mac = 1;
+  int num_qp_per_mac = 1;
+  int num_poll_entries = 16;
 
   int num_thread = 1;
   bool thread_local_cq = true;
@@ -57,8 +59,8 @@ struct ClientOption {
 
   uint32_t max_send_wr = 100;
   uint32_t max_recv_wr = 100;
-  uint32_t max_send_sge = 16;
-  uint32_t max_recv_sge = 16;
+  uint32_t max_send_sge = 1;
+  uint32_t max_recv_sge = 1;
 };
 
 struct TestOption {
@@ -70,18 +72,24 @@ struct TestOption {
     CAS,
     FETCH_ADD,
   };
-  uint32_t duration_ms = 10000;
-  int post_list;
-  
+
+  TestType type;
+  uint32_t duration_s = 10;
+  int post_list = 1;
+  size_t payload = 64;
 };
 
 struct TestResult {
-  double latency_us;
-  double throughput_Mops;
+  TestOption option;
+  std::vector<double> latency_us;
+  std::vector<double> throughput_Mops;
+  double avg_latency_us;
+  double avg_throughput_Mops;
 };
 
 struct QPHandle {
   ibv_qp *qp;
+  int cqid;
 
   struct peer_info_s {
     ibv_gid gid;
@@ -91,6 +99,7 @@ struct QPHandle {
     uint16_t lid;
     uint8_t gid_idx;
     uint32_t rkey;
+    size_t payload;
   };
 
   peer_info_s local;
@@ -120,6 +129,8 @@ struct MasterContext {
   std::vector<std::thread> poll_th;
   std::vector<QPHandle *> handles;
 
+  size_t max_payload;
+
   bool alive;
 
   MasterContext(MasterOption &option);
@@ -130,6 +141,8 @@ struct ClientContext {
   ClientOption option;
   ib_stat_s ib_stat;
 
+  int num_remote;
+  int num_handles;
   std::vector<std::vector<QPHandle *>> handles;
 
   ClientContext(ClientOption &option);
@@ -147,15 +160,36 @@ struct ClientContext {
     perror("");                                                                \
     __assert_fail(#expr, __FILE__, __LINE__, __ASSERT_FUNCTION);               \
   }))
+#define timeval_diff(e, s)                                                     \
+  ((e).tv_sec - (s).tv_sec * 1000000 + (e).tv_usec - (s).tv_usec)
+#define vector_sum(v, field)                                                   \
+  ({                                                                           \
+    decltype((v)[0].field) sum = 0;                                            \
+    for (auto &item : v)                                                       \
+      sum += item.field;                                                       \
+    sum;                                                                       \
+  })
+
+template <typename T>
+std::vector<T> flat(std::vector<std::vector<T>> &v) {
+  std::vector<T> r;
+  for (auto &vv : v) {
+    r.insert(r.end(), vv.begin(), vv.end());
+  }
+  return r;
+}
 
 void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           uint8_t gid_idx, int num_thread, bool thread_local_cq,
                           int cqe_depth, size_t mr_size);
 
-ibv_qp *create_qp(ib_stat_s &ib_stat, uint32_t max_send_wr,
+ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,
                   uint32_t max_recv_wr, uint32_t max_send_sge,
                   uint32_t max_recv_sge);
 void qp_init(QPHandle *handle, uint8_t ib_port);
 void qp_rtr_rts(QPHandle *handle, ib_stat_s &ib_stat, uint8_t ib_port);
+
+TestResult start_test(ClientContext *ctx, TestOption &option);
+uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size, size_t payload);
 
 #endif // __COMMON_H__
