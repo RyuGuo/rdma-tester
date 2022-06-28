@@ -8,12 +8,14 @@
 #include <errno.h>
 #include <infiniband/verbs.h>
 #include <mutex>
+#include <pthread.h>
 #include <string.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 #define DEFAULT_PORT 8989
@@ -30,8 +32,9 @@ struct MasterOption {
   bool thread_local_cq = true;
   size_t mr_size = 1L << 20;
   int num_poll_entries = 16;
+  int num_recv_wr_per_qp = 4;
 
-  bool use_srq = false;
+  bool use_srq = true;
   uint32_t max_wr = 16;
   uint32_t max_sge = 1;
   uint32_t srq_limit = 4;
@@ -52,6 +55,7 @@ struct ClientOption {
   int cqe_depth = 100;
   int num_qp_per_mac = 1;
   int num_poll_entries = 16;
+  size_t payload = 64;
 
   int num_thread = 1;
   bool thread_local_cq = true;
@@ -81,8 +85,8 @@ struct TestOption {
 
 struct TestResult {
   TestOption option;
-  std::vector<double> latency_us;
-  std::vector<double> throughput_Mops;
+  uint64_t cnt;
+  std::vector<uint64_t> cnt_duration;
   double avg_latency_us;
   double avg_throughput_Mops;
 };
@@ -99,11 +103,30 @@ struct QPHandle {
     uint16_t lid;
     uint8_t gid_idx;
     uint32_t rkey;
-    size_t payload;
   };
 
   peer_info_s local;
   peer_info_s remote;
+};
+
+struct QPConnectBufferStructure {
+  enum QPConnectType { INFO, COMPLETE } type;
+  union {
+    QPHandle::peer_info_s info;
+    size_t payload;
+  };
+
+  size_t size() {
+    switch (type) {
+    case INFO:
+      return sizeof(*this);
+      break;
+    case COMPLETE:
+      return sizeof(type);
+      break;
+    }
+    return 0;
+  }
 };
 
 struct ib_stat_s {
@@ -128,8 +151,11 @@ struct MasterContext {
   int listenfd;
   std::vector<std::thread> poll_th;
   std::vector<QPHandle *> handles;
+  std::unordered_map<uint32_t, QPHandle *> handle_map;
 
   size_t max_payload;
+
+  bool poll_sync_barrier;
 
   bool alive;
 
@@ -142,8 +168,7 @@ struct ClientContext {
   ib_stat_s ib_stat;
 
   int num_remote;
-  int num_handles;
-  std::vector<std::vector<QPHandle *>> handles;
+  std::vector<QPHandle *> handles;
 
   ClientContext(ClientOption &option);
   ~ClientContext();
@@ -161,7 +186,7 @@ struct ClientContext {
     __assert_fail(#expr, __FILE__, __LINE__, __ASSERT_FUNCTION);               \
   }))
 #define timeval_diff(e, s)                                                     \
-  ((e).tv_sec - (s).tv_sec * 1000000 + (e).tv_usec - (s).tv_usec)
+  (((e).tv_sec - (s).tv_sec) * 1000000 + (e).tv_usec - (s).tv_usec)
 #define vector_sum(v, field)                                                   \
   ({                                                                           \
     decltype((v)[0].field) sum = 0;                                            \
@@ -170,8 +195,13 @@ struct ClientContext {
     sum;                                                                       \
   })
 
-template <typename T>
-std::vector<T> flat(std::vector<std::vector<T>> &v) {
+#define assert_eq(a, b, f)                                                     \
+  (static_cast<bool>((a) == (b)) ? void(0) : ({                                \
+    fprintf(stdout, "Failed: " #a " = " f ", " #b " = " f "\n", a, b);         \
+    __assert_fail(#a " == " #b, __FILE__, __LINE__, __ASSERT_FUNCTION);        \
+  }))
+
+template <typename T> std::vector<T> flat(std::vector<std::vector<T>> &v) {
   std::vector<T> r;
   for (auto &vv : v) {
     r.insert(r.end(), vv.begin(), vv.end());

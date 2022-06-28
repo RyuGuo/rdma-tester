@@ -16,21 +16,19 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
 
   // connect to masters
   num_remote = option.master_ip.size();
-  handles.resize(num_remote);
   for (int i = 0; i < num_remote; ++i) {
+    QPConnectBufferStructure buf;
+    ssize_t n;
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    e_assert(sockfd != -1);
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(option.master_ip[i].c_str());
+    addr.sin_port = htons(option.port);
+    e_assert(connect(sockfd, (sockaddr *)&addr, sizeof(addr)) == 0);
+    fprintf(stdout, "Connect to %s:%d ...\n", option.master_ip[i].c_str(),
+            option.port);
     for (int j = 0; j < option.num_qp_per_mac; ++j) {
-      int n;
-      int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-      e_assert(sockfd != -1);
-      sockaddr_in addr;
-      addr.sin_family = AF_INET;
-      addr.sin_addr.s_addr = inet_addr(option.master_ip[i].c_str());
-      addr.sin_port = htons(option.port);
-      e_assert(connect(sockfd, (sockaddr *)&addr, sizeof(addr)) == 0);
-
-      fprintf(stdout, "Connect to %s:%d ...\n", option.master_ip[i].c_str(),
-              option.port);
-
       QPHandle *handle = new QPHandle();
       e_assert(handle != nullptr);
 
@@ -52,30 +50,41 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
           .gid_idx = option.gid_idx,
           .rkey = ib_stat.mr->rkey,
       };
-      n = send(sockfd, &handle->local, sizeof(handle->local), 0);
-      e_assert(n == sizeof(handle->local));
+
+      buf.type = QPConnectBufferStructure::INFO;
+      buf.info = handle->local;
+      n = send(sockfd, &buf, buf.size(), 0);
+      assert_eq(n, buf.size(), "%lu");
 
       // recv client qp info
-      n = recv(sockfd, &handle->remote, sizeof(handle->remote), 0);
-      e_assert(n == sizeof(handle->remote));
+      n = recv(sockfd, &buf, sizeof(buf), 0);
+      e_assert(n == buf.size());
+
+      handle->remote = buf.info;
 
       // connect local qp
       qp_rtr_rts(handle, ib_stat, option.ib_port);
 
       // connect one peer ok
-      ++num_handles;
-      handles[i].push_back(handle);
-
-      // qp info exchange ok
-      close(sockfd);
-
-      fprintf(stdout, "Connect to %s:%d success\n", option.master_ip[i].c_str(),
-              option.port);
+      handles.push_back(handle);
     }
+
+    buf.type = QPConnectBufferStructure::COMPLETE;
+    buf.payload = option.payload;
+    n = send(sockfd, &buf, buf.size(), 0);
+    e_assert(n == buf.size());
+
+    fprintf(stdout, "Connect to %s:%d success\n", option.master_ip[i].c_str(),
+            option.port);
+
+    // qp info exchange ok
+    close(sockfd);
   }
 }
 
 ClientContext::~ClientContext() {}
+
+static void sync_with_master(ClientContext &ctx) {}
 
 TestResult start_test(ClientContext *ctx, TestOption &option) {
   TestResult result;
@@ -85,18 +94,19 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   pthread_barrier_t b;
   pthread_barrier_init(&b, nullptr, ctx->option.num_thread + 1);
 
+  sync_with_master(*ctx);
+
   // ready for test resource
   struct __ {
     uint64_t c = 0;
     uint64_t padding[7];
   };
-  auto handles = flat(ctx->handles);
   vector<__> complete_cnt(ctx->option.num_thread);
   // sge [handle][sge list]
-  vector<vector<ibv_sge>> v_sge(ctx->num_handles);
+  vector<vector<ibv_sge>> v_sge(ctx->handles.size());
   // wr [handle][wr list]
-  vector<vector<ibv_send_wr>> v_wr(ctx->num_handles);
-  for (int i = 0; i < ctx->num_handles; ++i) {
+  vector<vector<ibv_send_wr>> v_wr(ctx->handles.size());
+  for (int i = 0; i < ctx->handles.size(); ++i) {
     auto &sges = v_sge[i];
     auto &wrs = v_wr[i];
     sges.resize(option.post_list);
@@ -114,10 +124,10 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
       wr.num_sge = 1;
       wr.next = &wrs[j + 1];
       wr.wr.rdma = {
-          .remote_addr =
-              rand_pick_mr_addr(handles[i]->remote.mr_addr,
-                                handles[i]->remote.mr_size, option.payload),
-          .rkey = handles[i]->remote.rkey,
+          .remote_addr = rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
+                                           ctx->handles[i]->remote.mr_size,
+                                           option.payload),
+          .rkey = ctx->handles[i]->remote.rkey,
       };
 
       switch (option.type) {
@@ -135,11 +145,21 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
         break;
       case TestOption::CAS:
         wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
+        wr.wr.atomic.remote_addr =
+            rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
+                              ctx->handles[i]->remote.mr_size, option.payload) &
+            ~0x7UL;
+        wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
         wr.wr.atomic.compare_add = 0;
         wr.wr.atomic.swap = 0;
         break;
       case TestOption::FETCH_ADD:
-        wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
+        wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+        wr.wr.atomic.remote_addr =
+            rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
+                              ctx->handles[i]->remote.mr_size, option.payload) &
+            ~0x7UL;
+        wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
         wr.wr.atomic.compare_add = 1;
         break;
       }
@@ -151,17 +171,18 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   // resource [cq][handle]
   vector<vector<pair<QPHandle *, vector<ibv_send_wr> *>>> resource_th(
       ctx->ib_stat.cqs.size());
-  for (int j = 0; j < ctx->num_handles; ++j) {
-    resource_th[handles[j]->cqid].push_back(make_pair(handles[j], &v_wr[j]));
+  for (int j = 0; j < ctx->handles.size(); ++j) {
+    resource_th[ctx->handles[j]->cqid].push_back(
+        make_pair(ctx->handles[j], &v_wr[j]));
   }
 
   // start test threads
   vector<thread> test_th;
   for (int tid = 0; tid < ctx->option.num_thread; ++tid) {
-    test_th.push_back(thread([&test_over, tid, &ctx, &b, &start_time,
-                              &end_time, &complete_cnt, &resource_th]() {
+    test_th.push_back(thread([&test_over, tid, &ctx, &b, &start_time, &end_time,
+                              &complete_cnt, &resource_th]() {
       int cqid = tid % ctx->ib_stat.cqs.size();
-      auto &resource = resource_th[tid % resource_th.size()];
+      auto &resource = resource_th[cqid];
       ibv_send_wr *bad_wr;
       ibv_wc *wcs = new ibv_wc[ctx->option.num_poll_entries];
       vector<bool> complete_flags(resource.size(), true);
@@ -210,13 +231,12 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
     gettimeofday(&now_time, nullptr);
     uint64_t c = vector_sum(complete_cnt, c) - last_c;
     uint64_t diff = timeval_diff(now_time, last_time);
-    last_c = c;
-    last_time = now_time;
-    result.latency_us.push_back(1.0 * diff / c);
-    result.throughput_Mops.push_back(1.0 * c / diff);
+    result.cnt_duration.push_back(c);
     fprintf(stdout, "Thoughput: %f Mops\n", 1.0 * c / diff);
+    last_c += c;
+    last_time = now_time;
   }
-
+  pthread_barrier_destroy(&b);
   test_over = true;
   for (int tid = 0; tid < ctx->option.num_thread; ++tid) {
     test_th[tid].join();
@@ -224,8 +244,9 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
 
   uint64_t diff = timeval_diff(end_time, start_time);
 
-  result.avg_latency_us = 1.0 * diff / vector_sum(complete_cnt, c);
-  result.avg_throughput_Mops = 1.0 * vector_sum(complete_cnt, c) / diff;
+  result.cnt = vector_sum(complete_cnt, c);
+  result.avg_latency_us = 1.0 * diff / result.cnt;
+  result.avg_throughput_Mops = 1.0 * result.cnt / diff;
 
   return result;
 }

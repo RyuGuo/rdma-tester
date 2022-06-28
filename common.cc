@@ -32,6 +32,7 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
   // create mr
   void *_mr = malloc(mr_size);
   e_assert(_mr != nullptr);
+  memset(_mr, 0, mr_size);
   ib_stat.mr = ibv_reg_mr(ib_stat.pd, _mr, mr_size, ACCESS_FLAGS);
   e_assert(ib_stat.mr != nullptr);
 }
@@ -77,6 +78,7 @@ void qp_rtr_rts(QPHandle *handle, ib_stat_s &ib_stat, uint8_t ib_port) {
   qp_attr.dest_qp_num = handle->remote.qp_num;
   qp_attr.rq_psn = PSN;
   qp_attr.min_rnr_timer = 12;
+  qp_attr.max_dest_rd_atomic = 8;
   if (ib_stat.port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
     qp_attr.ah_attr.is_global = true; // ROCE
     qp_attr.ah_attr.grh.dgid = handle->remote.gid;
@@ -97,7 +99,7 @@ void qp_rtr_rts(QPHandle *handle, ib_stat_s &ib_stat, uint8_t ib_port) {
   qp_attr.retry_cnt = 7;
   qp_attr.rnr_retry = 7;
   qp_attr.sq_psn = PSN;
-  qp_attr.max_dest_rd_atomic = 1;
+  qp_attr.max_rd_atomic = 8;
   e_assert(ibv_modify_qp(handle->qp, &qp_attr,
                          IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                              IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |

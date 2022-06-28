@@ -1,9 +1,30 @@
 #include "common.h"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
 #include <infiniband/verbs.h>
+#include <pthread.h>
 
 using namespace std;
+
+static vector<ibv_recv_wr> wrs;
+static vector<ibv_sge> sges;
+
+static void ready_for_recv_resource(MasterContext &ctx) {
+  wrs.resize(ctx.option.max_recv_wr);
+  sges.resize(ctx.option.max_recv_wr);
+
+  for (int i = 0; i < ctx.option.max_recv_wr; ++i) {
+    sges[i].addr = rand_pick_mr_addr((uint64_t)ctx.ib_stat.mr->addr,
+                                     ctx.ib_stat.mr->length, ctx.max_payload);
+    sges[i].length = ctx.max_payload;
+    sges[i].lkey = ctx.ib_stat.mr->lkey;
+    wrs[i].sg_list = &sges[i];
+    wrs[i].num_sge = 1;
+    wrs[i].next = nullptr;
+    wrs[i].wr_id = i;
+  }
+}
 
 static void rdma_connect_listener(MasterContext &ctx) {
   ctx.listenfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -22,7 +43,7 @@ static void rdma_connect_listener(MasterContext &ctx) {
   fprintf(stdout, "Wait for Connect...\n");
 
   while (ctx.alive) {
-    int n;
+    ssize_t n;
     sockaddr_in client_addr;
     socklen_t len = sizeof(sockaddr);
     int sockfd = accept(ctx.listenfd, (sockaddr *)&client_addr, &len);
@@ -30,69 +51,86 @@ static void rdma_connect_listener(MasterContext &ctx) {
 
     fprintf(stdout, "Connect from %s ...\n", inet_ntoa(client_addr.sin_addr));
 
-    QPHandle *handle = new QPHandle();
-    e_assert(handle != nullptr);
+    while (ctx.alive) {
+      QPConnectBufferStructure buf;
 
-    // recv client qp info
-    n = recv(sockfd, &handle->remote, sizeof(handle->remote), 0);
-    e_assert(n == sizeof(handle->remote));
+      // recv client qp info
+      n = recv(sockfd, &buf, sizeof(buf), 0);
+      assert_eq(n, buf.size(), "%lu");
 
-    // connect local qp
-    int cqid = rand() % ctx.ib_stat.cqs.size();
-    handle->cqid = cqid;
-    handle->qp = create_qp(ctx.ib_stat, cqid, ctx.option.max_send_wr,
-                           ctx.option.max_recv_wr, ctx.option.max_send_sge,
-                           ctx.option.max_recv_sge);
+      if (buf.type == QPConnectBufferStructure::INFO) {
+        QPHandle *handle = new QPHandle();
+        e_assert(handle != nullptr);
 
-    qp_init(handle, ctx.option.ib_port);
-    qp_rtr_rts(handle, ctx.ib_stat, ctx.option.ib_port);
+        handle->remote = buf.info;
 
-    // send local qp info
-    handle->local = {
-        .gid = ctx.ib_stat.gid,
-        .mr_addr = (uint64_t)ctx.ib_stat.mr->addr,
-        .mr_size = ctx.ib_stat.mr->length,
-        .qp_num = handle->qp->qp_num,
-        .lid = ctx.ib_stat.port_attr.lid,
-        .gid_idx = ctx.option.gid_idx,
-        .rkey = ctx.ib_stat.mr->rkey,
-    };
-    n = send(sockfd, &handle->local, sizeof(handle->local), 0);
-    e_assert(n == sizeof(handle->local));
+        // connect local qp
+        int cqid = rand() % ctx.ib_stat.cqs.size();
+        handle->cqid = cqid;
+        handle->qp = create_qp(ctx.ib_stat, cqid, ctx.option.max_send_wr,
+                               ctx.option.max_recv_wr, ctx.option.max_send_sge,
+                               ctx.option.max_recv_sge);
 
-    // connect one peer ok
-    ctx.handles.push_back(handle);
+        qp_init(handle, ctx.option.ib_port);
+        qp_rtr_rts(handle, ctx.ib_stat, ctx.option.ib_port);
 
+        // send local qp info
+        handle->local = {
+            .gid = ctx.ib_stat.gid,
+            .mr_addr = (uint64_t)ctx.ib_stat.mr->addr,
+            .mr_size = ctx.ib_stat.mr->length,
+            .qp_num = handle->qp->qp_num,
+            .lid = ctx.ib_stat.port_attr.lid,
+            .gid_idx = ctx.option.gid_idx,
+            .rkey = ctx.ib_stat.mr->rkey,
+        };
+
+        buf.type = QPConnectBufferStructure::INFO;
+        buf.info = handle->local;
+        n = send(sockfd, &buf, buf.size(), 0);
+        e_assert(n == buf.size());
+
+        // connect one peer ok
+        ctx.handles.push_back(handle);
+        ctx.handle_map.insert(make_pair(handle->qp->qp_num, handle));
+      } else if (buf.type == QPConnectBufferStructure::COMPLETE) {
+        ctx.max_payload = max(ctx.max_payload, buf.payload);
+        
+        if (ctx.poll_sync_barrier) {
+          ready_for_recv_resource(ctx);
+        }
+
+        // poll client qps
+        ibv_recv_wr *bad_wr;
+        for (int i = 0; i < ctx.option.num_recv_wr_per_qp; ++i) {
+          if (ctx.option.use_srq)
+            assert(ibv_post_srq_recv(ctx.ib_stat.srq, &wrs[rand() % wrs.size()],
+                                     &bad_wr) == 0);
+          else
+            assert(ibv_post_recv(ctx.handles.back()->qp,
+                                 &wrs[rand() % wrs.size()], &bad_wr) == 0);
+        }
+        close(sockfd);
+        ctx.poll_sync_barrier = false;
+        break;
+      }
+    }
     fprintf(stdout, "Connect from %s success\n",
             inet_ntoa(client_addr.sin_addr));
   }
 }
 
 static void poll_worker(MasterContext &ctx, int tid) {
-  int cqid = tid % ctx.ib_stat.cqs.size();
   ibv_wc *wcs = new ibv_wc[ctx.option.num_poll_entries];
-  vector<ibv_recv_wr> wrs(ctx.option.max_recv_wr);
   ibv_recv_wr *bad_wr;
-  vector<ibv_sge> sges(ctx.option.max_recv_wr);
-  for (int i = 0; i < ctx.option.max_recv_wr; ++i) {
-    sges[i].addr = rand_pick_mr_addr((uint64_t)ctx.ib_stat.mr->addr,
-                                     ctx.ib_stat.mr->length, ctx.max_payload);
-    sges[i].length = ctx.max_payload;
-    sges[i].lkey = ctx.ib_stat.mr->lkey;
-    wrs[i].sg_list = &sges[i];
-    wrs[i].num_sge = 1;
-    wrs[i].next = nullptr;
-    wrs[i].wr_id = i;
 
-    if (ctx.option.use_srq)
-      assert(ibv_post_srq_recv(ctx.ib_stat.srq, &wrs[i], &bad_wr) == 0);
-    else
-      assert(ibv_post_recv(ctx.handles[i % ctx.handles.size()]->qp, &wrs[i],
-                           &bad_wr) == 0);
+  // sync point
+  while (ctx.poll_sync_barrier) {
   }
 
   while (ctx.alive) {
-    int n = ibv_poll_cq(ctx.ib_stat.cqs[tid], ctx.option.num_poll_entries, wcs);
+    int n = ibv_poll_cq(ctx.ib_stat.cqs[tid % ctx.ib_stat.cqs.size()],
+                        ctx.option.num_poll_entries, wcs);
     for (int i = 0; i < n; ++i) {
       if (wcs[i].status != IBV_WC_SUCCESS) {
         fprintf(stderr, "Poll CQ Error: status: %d\n", wcs[i].status);
@@ -101,9 +139,8 @@ static void poll_worker(MasterContext &ctx, int tid) {
           assert(ibv_post_srq_recv(ctx.ib_stat.srq, &wrs[wcs[i].wr_id],
                                    &bad_wr) == 0);
         else
-          assert(
-              ibv_post_recv(ctx.handles[wcs[i].wr_id % ctx.handles.size()]->qp,
-                            &wrs[wcs[i].wr_id], &bad_wr) == 0);
+          assert(ibv_post_recv(ctx.handle_map[wcs[i].qp_num]->qp,
+                               &wrs[wcs[i].wr_id], &bad_wr) == 0);
       }
     }
   }
@@ -111,7 +148,8 @@ static void poll_worker(MasterContext &ctx, int tid) {
   delete[] wcs;
 }
 
-MasterContext::MasterContext(MasterOption &option) : option(option) {
+MasterContext::MasterContext(MasterOption &option)
+    : option(option), poll_sync_barrier(true) {
   srand(time(nullptr));
 
   open_device_and_port(ib_stat, option.device_id, option.ib_port,
