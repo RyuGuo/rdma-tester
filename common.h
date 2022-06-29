@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <errno.h>
 #include <infiniband/verbs.h>
-#include <libpmem.h>
 #include <mutex>
 #include <pthread.h>
 #include <string.h>
@@ -18,6 +17,14 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
+
+#ifdef USE_PMEM
+#include <libpmem.h>
+#endif // USE_PMEM
+
+#ifdef USE_MPI
+#include <mpi.h>
+#endif // USE_MPI
 
 #define DEFAULT_PORT 8989
 

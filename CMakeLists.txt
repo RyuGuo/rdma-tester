@@ -4,7 +4,7 @@ project(rdma_test)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_compile_options(-O2 -g)
+add_compile_options(-O2 -g -DUSE_PMEM)
 
 aux_source_directory(./ DIR_SRCS)
 

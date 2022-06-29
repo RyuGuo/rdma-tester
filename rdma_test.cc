@@ -4,9 +4,17 @@
 
 using namespace std;
 
-#define USE_PMEM
-
 int main(int argc, char *argv[]) {
+#ifdef USE_MPI
+  const int root_rank = 0;
+  MPI_Init(&argc, &argv);
+  int comm_size;
+  int my_rank;
+  MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+  double sum_thoughput = 0;
+#endif // USE_MPI
+
   if (argc == 1) {
     MasterOption option;
     option.num_recv_wr_per_qp = 32;
@@ -36,11 +44,27 @@ int main(int argc, char *argv[]) {
     cout << "READ avg throughput: " << result.avg_throughput_Mops << " MOPS"
          << endl;
 
+#ifdef USE_MPI
+    MPI_Reduce(&result.avg_throughput_Mops, &sum_thoughput, 1, MPI_DOUBLE,
+               MPI_SUM, root_rank, MPI_COMM_WORLD);
+    if (my_rank == root_rank) {
+      cout << "READ TOTAL THROUGHPUT: " << sum_thoughput << " MOPS" << endl;
+    }
+#endif // USE_MPI
+
     test_option.type = TestOption::SEND;
     result = start_test(ctx, test_option);
     cout << "SEND avg latency: " << result.avg_latency_us << " us" << endl;
     cout << "SEND avg throughput: " << result.avg_throughput_Mops << " MOPS"
          << endl;
+
+#ifdef USE_MPI
+    MPI_Reduce(&result.avg_throughput_Mops, &sum_thoughput, 1, MPI_DOUBLE,
+               MPI_SUM, root_rank, MPI_COMM_WORLD);
+    if (my_rank == root_rank) {
+      cout << "READ TOTAL THROUGHPUT: " << sum_thoughput << " MOPS" << endl;
+    }
+#endif // USE_MPI
 
     test_option.type = TestOption::WRITE_WITH_IMM;
     result = start_test(ctx, test_option);
@@ -49,6 +73,14 @@ int main(int argc, char *argv[]) {
     cout << "WRITE_WITH_IMM avg throughput: " << result.avg_throughput_Mops
          << " MOPS" << endl;
 
+#ifdef USE_MPI
+    MPI_Reduce(&result.avg_throughput_Mops, &sum_thoughput, 1, MPI_DOUBLE,
+               MPI_SUM, root_rank, MPI_COMM_WORLD);
+    if (my_rank == root_rank) {
+      cout << "READ TOTAL THROUGHPUT: " << sum_thoughput << " MOPS" << endl;
+    }
+#endif // USE_MPI
+
 #ifndef USE_PMEM
     test_option.type = TestOption::WRITE;
     result = start_test(ctx, test_option);
@@ -56,18 +88,46 @@ int main(int argc, char *argv[]) {
     cout << "WRITE avg throughput: " << result.avg_throughput_Mops << " MOPS"
          << endl;
 
+#ifdef USE_MPI
+    MPI_Reduce(&result.avg_throughput_Mops, &sum_thoughput, 1, MPI_DOUBLE,
+               MPI_SUM, root_rank, MPI_COMM_WORLD);
+    if (my_rank == root_rank) {
+      cout << "READ TOTAL THROUGHPUT: " << sum_thoughput << " MOPS" << endl;
+    }
+#endif // USE_MPI
+
     test_option.type = TestOption::CAS;
     result = start_test(ctx, test_option);
     cout << "CAS avg latency: " << result.avg_latency_us << " us" << endl;
     cout << "CAS avg throughput: " << result.avg_throughput_Mops << " MOPS"
          << endl;
 
+#ifdef USE_MPI
+    MPI_Reduce(&result.avg_throughput_Mops, &sum_thoughput, 1, MPI_DOUBLE,
+               MPI_SUM, root_rank, MPI_COMM_WORLD);
+    if (my_rank == root_rank) {
+      cout << "READ TOTAL THROUGHPUT: " << sum_thoughput << " MOPS" << endl;
+    }
+#endif // USE_MPI
+
     test_option.type = TestOption::FETCH_ADD;
     result = start_test(ctx, test_option);
     cout << "FETCH_ADD avg latency: " << result.avg_latency_us << " us" << endl;
     cout << "FETCH_ADD avg throughput: " << result.avg_throughput_Mops
          << " MOPS" << endl;
+
+#ifdef USE_MPI
+    MPI_Reduce(&result.avg_throughput_Mops, &sum_thoughput, 1, MPI_DOUBLE,
+               MPI_SUM, root_rank, MPI_COMM_WORLD);
+    if (my_rank == root_rank) {
+      cout << "READ TOTAL THROUGHPUT: " << sum_thoughput << " MOPS" << endl;
+    }
+#endif // USE_MPI
 #endif // USE_PMEM
+
+#ifdef USE_MPI
+    MPI_Finalize();
+#endif // USE_MPI
   }
   return 0;
 }

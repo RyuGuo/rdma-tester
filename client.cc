@@ -207,12 +207,23 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
     vector<ibv_recv_wr> *rrs;
   };
   vector<vector<__resource_t>> resource_th(ctx->ib_stat.cqs.size());
-  for (int j = 0; j < ctx->handles.size(); ++j) {
-    resource_th[ctx->handles[j]->cqid].push_back(
-        __resource_t{ctx->handles[j], &v_wr[j], &v_rr[j]});
+  for (int i = 0; i < ctx->handles.size(); ++i) {
+    resource_th[ctx->handles[i]->cqid].push_back(
+        __resource_t{ctx->handles[i], &v_wr[i], &v_rr[i]});
+  }
+  for (auto &resource : resource_th) {
+    for (int i = 0; i < resource.size(); ++i) {
+      resource[i].wrs->back().wr_id = i;
+      for (int j = 0; j < resource[i].rrs->size(); ++j) {
+        resource[i].rrs->at(j).wr_id = i;
+      }
+    }
   }
 
-  // sync point
+// sync point
+#ifdef USE_MPI
+  MPI_Barrier(MPI_COMM_WORLD);
+#endif // USE_MPI
 
   // start test threads
   vector<thread> test_th;
@@ -225,12 +236,6 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
       ibv_recv_wr *bad_rr;
       ibv_wc *wcs = new ibv_wc[ctx->option.num_poll_entries];
       unordered_map<uint32_t, int> batch_recv_cnt_map;
-      for (int i = 0; i < resource.size(); ++i) {
-        resource[i].wrs->back().wr_id = i;
-        for (int j = 0; j < resource[i].rrs->size(); ++j) {
-          resource[i].rrs->at(j).wr_id = i;
-        }
-      }
 
       // local thread sync point
       pthread_barrier_wait(&b);

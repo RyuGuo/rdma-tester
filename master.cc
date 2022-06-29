@@ -129,8 +129,6 @@ static void poll_worker(MasterContext &ctx, int tid) {
   ibv_send_wr *bad_wr;
   ibv_recv_wr *bad_rr;
 
-  // sync point
-
   while (ctx.alive) {
     int n = ibv_poll_cq(ctx.ib_stat.cqs[tid % ctx.ib_stat.cqs.size()],
                         ctx.option.num_poll_entries, wcs);
@@ -141,6 +139,7 @@ static void poll_worker(MasterContext &ctx, int tid) {
         if ((wcs[i].opcode & IBV_WC_RECV) == 0) {
           continue;
         }
+#ifdef USE_PMEM
         if (ctx.use_pmem) {
           void *clp;
           if (wcs[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
@@ -154,6 +153,7 @@ static void poll_worker(MasterContext &ctx, int tid) {
           e_assert(ibv_post_send(ctx.handle_map[wcs[i].qp_num]->qp, &wr,
                                  &bad_wr) == 0);
         }
+#endif // USE_PMEM
         if (ctx.option.use_srq)
           e_assert(ibv_post_srq_recv(ctx.ib_stat.srq, &rrs[wcs[i].wr_id],
                                      &bad_rr) == 0);

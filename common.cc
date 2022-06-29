@@ -1,5 +1,4 @@
 #include "common.h"
-#include <libpmem.h>
 
 uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size, size_t payload) {
   return mr_addr + rand() % (mr_size - payload);
@@ -32,6 +31,10 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
 
   // create mr
   void *_mr;
+#ifndef USE_PMEM
+  _mr = malloc(mr_size);
+  *is_pmemp = false;
+#else
   if (pmem_dev_path.size() == 0) {
     _mr = malloc(mr_size);
     *is_pmemp = false;
@@ -44,6 +47,7 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
     e_assert(mapped_len >= mr_size);
     *is_pmemp = true;
   }
+#endif // USE_PMEM
   e_assert(_mr != nullptr);
   memset(_mr, 0, mr_size);
   ib_stat.mr = ibv_reg_mr(ib_stat.pd, _mr, mr_size, ACCESS_FLAGS);
