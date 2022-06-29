@@ -47,6 +47,7 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
           .gid_idx = option.gid_idx,
           .rkey = ib_stat.mr->rkey,
           .is_pmem = use_pmem,
+          .use_ddio = option.use_ddio,
       };
 
       buf.type = QPConnectBufferStructure::INFO;
@@ -109,6 +110,13 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
     sges.resize(option.post_list);
     wrs.resize(option.post_list);
     rrs.resize(option.post_list);
+    if (!ctx->handles[i]->remote.use_ddio) {
+      wrs.resize(option.post_list + 1);
+      auto &wrb = wrs.back();
+      clr_obj(wrb);
+      wrb.opcode = IBV_WR_RDMA_READ;
+      wrb.num_sge = 0;
+    }
 
     for (int j = 0; j < option.post_list; ++j) {
       auto &sge = sges[j];
@@ -245,6 +253,7 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
         e_assert(ibv_post_send(resource[i].handle->qp,
                                &resource[i].wrs->front(), &bad_wr) == 0);
         if (resource[i].handle->remote.is_pmem &&
+            resource[i].handle->remote.use_ddio &&
             option.type != TestOption::READ) {
           e_assert(ibv_post_recv(resource[i].handle->qp,
                                  &resource[i].rrs->front(), &bad_rr) == 0);
@@ -259,7 +268,9 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
           } else {
             uint64_t wid = wcs[i].wr_id;
             bool is_pmem = resource[wid].handle->remote.is_pmem;
-            bool pmem_exec = is_pmem && option.type != TestOption::READ;
+            bool use_ddio = resource[wid].handle->remote.use_ddio;
+            bool pmem_exec =
+                is_pmem && use_ddio && option.type != TestOption::READ;
             if (pmem_exec && (wcs[i].opcode & IBV_WC_RECV) == 0) {
               continue;
             }

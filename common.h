@@ -43,6 +43,8 @@ struct MasterOption {
   int num_recv_wr_per_qp = 4;
   std::string pmem_dev_path;
 
+  bool use_ddio = true;
+
   bool use_srq = true;
   uint32_t max_wr = 100;
   uint32_t max_sge = 1;
@@ -66,6 +68,8 @@ struct ClientOption {
   int num_poll_entries = 16;
   size_t payload = 64;
   std::string pmem_dev_path;
+
+  bool use_ddio = true;
 
   int num_thread = 1;
   bool thread_local_cq = true;
@@ -114,6 +118,7 @@ struct QPHandle {
     uint8_t gid_idx;
     uint32_t rkey;
     bool is_pmem;
+    bool use_ddio;
   };
 
   peer_info_s local;

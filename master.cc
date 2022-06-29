@@ -82,6 +82,7 @@ static void rdma_connect_listener(MasterContext &ctx) {
             .gid_idx = ctx.option.gid_idx,
             .rkey = ctx.ib_stat.mr->rkey,
             .is_pmem = ctx.use_pmem,
+            .use_ddio = ctx.option.use_ddio,
         };
 
         buf.type = QPConnectBufferStructure::INFO;
@@ -140,7 +141,7 @@ static void poll_worker(MasterContext &ctx, int tid) {
           continue;
         }
 #ifdef USE_PMEM
-        if (ctx.use_pmem) {
+        if (ctx.use_pmem && ctx.option.use_ddio) {
           void *clp;
           if (wcs[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
             clp = (void *)((uint64_t)ctx.ib_stat.mr->addr + wcs[i].imm_data);
