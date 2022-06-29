@@ -30,7 +30,9 @@ int main(int argc, char *argv[]) {
     option.device_id = 1;
     option.num_qp_per_mac = 4;
     option.num_thread = 4;
-    option.master_ip.push_back(argv[1]);
+    for (int i = 1; i < argc; ++i) {
+      option.master_ip.push_back(argv[i]);
+    }
     ClientContext *ctx = new ClientContext(option);
 
     TestOption test_option;
