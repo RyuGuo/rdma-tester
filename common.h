@@ -33,9 +33,10 @@ struct MasterOption {
   size_t mr_size = 1L << 20;
   int num_poll_entries = 16;
   int num_recv_wr_per_qp = 4;
+  std::string pmem_dev_path;
 
   bool use_srq = true;
-  uint32_t max_wr = 16;
+  uint32_t max_wr = 100;
   uint32_t max_sge = 1;
   uint32_t srq_limit = 4;
 
@@ -56,6 +57,7 @@ struct ClientOption {
   int num_qp_per_mac = 1;
   int num_poll_entries = 16;
   size_t payload = 64;
+  std::string pmem_dev_path;
 
   int num_thread = 1;
   bool thread_local_cq = true;
@@ -103,6 +105,7 @@ struct QPHandle {
     uint16_t lid;
     uint8_t gid_idx;
     uint32_t rkey;
+    bool is_pmem;
   };
 
   peer_info_s local;
@@ -154,8 +157,8 @@ struct MasterContext {
   std::unordered_map<uint32_t, QPHandle *> handle_map;
 
   size_t max_payload;
-
-  bool poll_sync_barrier;
+  bool use_pmem;
+  bool ready_for_resource;
 
   bool alive;
 
@@ -168,6 +171,7 @@ struct ClientContext {
   ib_stat_s ib_stat;
 
   int num_remote;
+  bool use_pmem;
   std::vector<QPHandle *> handles;
 
   ClientContext(ClientOption &option);
@@ -189,15 +193,16 @@ struct ClientContext {
   (((e).tv_sec - (s).tv_sec) * 1000000 + (e).tv_usec - (s).tv_usec)
 #define vector_sum(v, field)                                                   \
   ({                                                                           \
-    decltype((v)[0].field) sum = 0;                                            \
+    decltype((v)[0] field) sum = 0;                                            \
     for (auto &item : v)                                                       \
-      sum += item.field;                                                       \
+      sum += item field;                                                       \
     sum;                                                                       \
   })
 
 #define assert_eq(a, b, f)                                                     \
   (static_cast<bool>((a) == (b)) ? void(0) : ({                                \
-    fprintf(stdout, "Failed: " #a " = " f ", " #b " = " f "\n", a, b);         \
+    fprintf(stdout, "%s: " #a " = " f ", " #b " = " f "\n", strerror(errno),   \
+            a, b);                                                             \
     __assert_fail(#a " == " #b, __FILE__, __LINE__, __ASSERT_FUNCTION);        \
   }))
 
@@ -211,7 +216,8 @@ template <typename T> std::vector<T> flat(std::vector<std::vector<T>> &v) {
 
 void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           uint8_t gid_idx, int num_thread, bool thread_local_cq,
-                          int cqe_depth, size_t mr_size);
+                          int cqe_depth, size_t mr_size,
+                          std::string &pmem_dev_path, bool *is_pmemp);
 
 ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,
                   uint32_t max_recv_wr, uint32_t max_send_sge,

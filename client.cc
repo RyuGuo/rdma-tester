@@ -1,8 +1,10 @@
 #include "common.h"
+#include <cstdlib>
 #include <infiniband/verbs.h>
 #include <pthread.h>
 #include <sys/select.h>
 #include <unistd.h>
+#include <unordered_map>
 
 using namespace std;
 
@@ -11,8 +13,8 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
 
   open_device_and_port(ib_stat, option.device_id, option.ib_port,
                        option.gid_idx, option.num_thread,
-                       option.thread_local_cq, option.cqe_depth,
-                       option.mr_size);
+                       option.thread_local_cq, option.cqe_depth, option.mr_size,
+                       option.pmem_dev_path, &use_pmem);
 
   // connect to masters
   num_remote = option.master_ip.size();
@@ -32,7 +34,8 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
       QPHandle *handle = new QPHandle();
       e_assert(handle != nullptr);
 
-      int cqid = rand() % ib_stat.cqs.size();
+      static int cqid_gen = 0;
+      int cqid = (cqid_gen++) % ib_stat.cqs.size();
       handle->cqid = cqid;
       handle->qp =
           create_qp(ib_stat, cqid, option.max_send_wr, option.max_recv_wr,
@@ -49,6 +52,7 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
           .lid = ib_stat.port_attr.lid,
           .gid_idx = option.gid_idx,
           .rkey = ib_stat.mr->rkey,
+          .is_pmem = use_pmem,
       };
 
       buf.type = QPConnectBufferStructure::INFO;
@@ -84,8 +88,6 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
 
 ClientContext::~ClientContext() {}
 
-static void sync_with_master(ClientContext &ctx) {}
-
 TestResult start_test(ClientContext *ctx, TestOption &option) {
   TestResult result;
   result.option = option;
@@ -93,8 +95,6 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   bool test_over = false;
   pthread_barrier_t b;
   pthread_barrier_init(&b, nullptr, ctx->option.num_thread + 1);
-
-  sync_with_master(*ctx);
 
   // ready for test resource
   struct __ {
@@ -106,21 +106,28 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   vector<vector<ibv_sge>> v_sge(ctx->handles.size());
   // wr [handle][wr list]
   vector<vector<ibv_send_wr>> v_wr(ctx->handles.size());
+  // rr [handle][rr list]
+  vector<vector<ibv_recv_wr>> v_rr(ctx->handles.size());
   for (int i = 0; i < ctx->handles.size(); ++i) {
     auto &sges = v_sge[i];
     auto &wrs = v_wr[i];
+    auto &rrs = v_rr[i];
     sges.resize(option.post_list);
     wrs.resize(option.post_list);
+    rrs.resize(option.post_list);
 
     for (int j = 0; j < option.post_list; ++j) {
+      auto &sge = sges[j];
       auto &wr = wrs[j];
-      clr_obj(sges[j]);
+      auto &rr = rrs[j];
+      clr_obj(sge);
       clr_obj(wr);
-      sges[j].addr = rand_pick_mr_addr((uint64_t)ctx->ib_stat.mr->addr,
-                                       ctx->ib_stat.mr->length, option.payload);
-      sges[j].length = option.payload;
-      sges[j].lkey = ctx->ib_stat.mr->lkey;
-      wr.sg_list = &sges[j];
+      clr_obj(rr);
+      sge.addr = rand_pick_mr_addr((uint64_t)ctx->ib_stat.mr->addr,
+                                   ctx->ib_stat.mr->length, option.payload);
+      sge.length = option.payload;
+      sge.lkey = ctx->ib_stat.mr->lkey;
+      wr.sg_list = &sge;
       wr.num_sge = 1;
       wr.next = &wrs[j + 1];
       wr.wr.rdma = {
@@ -130,87 +137,153 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
           .rkey = ctx->handles[i]->remote.rkey,
       };
 
-      switch (option.type) {
-      case TestOption::WRITE:
-        wr.opcode = IBV_WR_RDMA_WRITE;
-        break;
-      case TestOption::WRITE_WITH_IMM:
-        wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-        break;
-      case TestOption::READ:
-        wr.opcode = IBV_WR_RDMA_READ;
-        break;
-      case TestOption::SEND:
-        wr.opcode = IBV_WR_SEND;
-        break;
-      case TestOption::CAS:
-        wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
-        wr.wr.atomic.remote_addr =
-            rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
-                              ctx->handles[i]->remote.mr_size, option.payload) &
-            ~0x7UL;
-        wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
-        wr.wr.atomic.compare_add = 0;
-        wr.wr.atomic.swap = 0;
-        break;
-      case TestOption::FETCH_ADD:
-        wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
-        wr.wr.atomic.remote_addr =
-            rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
-                              ctx->handles[i]->remote.mr_size, option.payload) &
-            ~0x7UL;
-        wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
-        wr.wr.atomic.compare_add = 1;
-        break;
+      rr.num_sge = 0;
+      rr.next = &rrs[j + 1];
+
+      if (!ctx->handles[i]->remote.is_pmem) {
+        switch (option.type) {
+        case TestOption::WRITE:
+          wr.opcode = IBV_WR_RDMA_WRITE;
+          break;
+        case TestOption::WRITE_WITH_IMM:
+          wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+          break;
+        case TestOption::READ:
+          wr.opcode = IBV_WR_RDMA_READ;
+          break;
+        case TestOption::SEND:
+          wr.opcode = IBV_WR_SEND;
+          break;
+        case TestOption::CAS:
+          wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
+          wr.wr.atomic.remote_addr =
+              rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
+                                ctx->handles[i]->remote.mr_size,
+                                option.payload) &
+              ~0x7UL;
+          wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
+          wr.wr.atomic.compare_add = 0;
+          wr.wr.atomic.swap = 0;
+          break;
+        case TestOption::FETCH_ADD:
+          wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+          wr.wr.atomic.remote_addr =
+              rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
+                                ctx->handles[i]->remote.mr_size,
+                                option.payload) &
+              ~0x7UL;
+          wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
+          wr.wr.atomic.compare_add = 1;
+          break;
+        default:
+          fprintf(stderr, "Invalid Test Type: %d\n", option.type);
+          exit(1);
+        }
+      } else {
+        switch (option.type) {
+        case TestOption::WRITE_WITH_IMM:
+          wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+          // align of 64B
+          wr.wr.rdma.remote_addr &= ~0x3fUL;
+          // write offset
+          wr.imm_data =
+              wr.wr.rdma.remote_addr - ctx->handles[i]->remote.mr_addr;
+          break;
+        case TestOption::READ:
+          wr.opcode = IBV_WR_RDMA_READ;
+          break;
+        case TestOption::SEND:
+          wr.opcode = IBV_WR_SEND;
+          break;
+        default:
+          fprintf(stderr, "Invalid Test Type: %d\n", option.type);
+          exit(1);
+        }
       }
     }
     wrs.back().send_flags = IBV_SEND_SIGNALED;
     wrs.back().next = nullptr;
+    rrs.back().next = nullptr;
   }
 
   // resource [cq][handle]
-  vector<vector<pair<QPHandle *, vector<ibv_send_wr> *>>> resource_th(
-      ctx->ib_stat.cqs.size());
+  struct __resource_t {
+    QPHandle *handle;
+    vector<ibv_send_wr> *wrs;
+    vector<ibv_recv_wr> *rrs;
+  };
+  vector<vector<__resource_t>> resource_th(ctx->ib_stat.cqs.size());
   for (int j = 0; j < ctx->handles.size(); ++j) {
     resource_th[ctx->handles[j]->cqid].push_back(
-        make_pair(ctx->handles[j], &v_wr[j]));
+        __resource_t{ctx->handles[j], &v_wr[j], &v_rr[j]});
   }
+
+  // sync point
 
   // start test threads
   vector<thread> test_th;
   for (int tid = 0; tid < ctx->option.num_thread; ++tid) {
     test_th.push_back(thread([&test_over, tid, &ctx, &b, &start_time, &end_time,
-                              &complete_cnt, &resource_th]() {
+                              &complete_cnt, &resource_th, &option]() {
       int cqid = tid % ctx->ib_stat.cqs.size();
       auto &resource = resource_th[cqid];
       ibv_send_wr *bad_wr;
+      ibv_recv_wr *bad_rr;
       ibv_wc *wcs = new ibv_wc[ctx->option.num_poll_entries];
-      vector<bool> complete_flags(resource.size(), true);
+      unordered_map<uint32_t, int> batch_recv_cnt_map;
       for (int i = 0; i < resource.size(); ++i) {
-        resource[i].second->back().wr_id = i;
+        resource[i].wrs->back().wr_id = i;
+        for (int j = 0; j < resource[i].rrs->size(); ++j) {
+          resource[i].rrs->at(j).wr_id = i;
+        }
       }
 
-      // sync point
+      // local thread sync point
       pthread_barrier_wait(&b);
       gettimeofday(&start_time, nullptr);
 
-      while (!test_over) {
-        for (int i = 0; i < resource.size(); ++i) {
-          if (!complete_flags[i])
-            continue;
-          e_assert(ibv_post_send(resource[i].first->qp,
-                                 &resource[i].second->front(), &bad_wr) == 0);
-          complete_flags[i] = false;
+      for (int i = 0; i < resource.size(); ++i) {
+        e_assert(ibv_post_send(resource[i].handle->qp,
+                               &resource[i].wrs->front(), &bad_wr) == 0);
+        if (resource[i].handle->remote.is_pmem &&
+            option.type != TestOption::READ) {
+          e_assert(ibv_post_recv(resource[i].handle->qp,
+                                 &resource[i].rrs->front(), &bad_rr) == 0);
         }
-
+      }
+      while (!test_over) {
         int n = ibv_poll_cq(ctx->ib_stat.cqs[cqid],
                             ctx->option.num_poll_entries, wcs);
         for (int i = 0; i < n; ++i) {
           if (wcs[i].status != IBV_WC_SUCCESS) {
             fprintf(stderr, "Poll CQ Error: status: %d\n", wcs[i].status);
           } else {
+            uint64_t wid = wcs[i].wr_id;
+            bool is_pmem = resource[wid].handle->remote.is_pmem;
+            bool pmem_exec = is_pmem && option.type != TestOption::READ;
+            if (pmem_exec && (wcs[i].opcode & IBV_WC_RECV) == 0) {
+              continue;
+            }
+
             ++complete_cnt[tid].c;
-            complete_flags[wcs[i].wr_id] = true;
+
+            if (pmem_exec) {
+              // wait for post num recv
+              int rc = ++batch_recv_cnt_map[wcs[i].imm_data];
+              if (rc == option.post_list) {
+                batch_recv_cnt_map[wcs[i].imm_data] = 0;
+              } else {
+                continue;
+              }
+            }
+
+            e_assert(ibv_post_send(resource[wid].handle->qp,
+                                   &resource[wid].wrs->front(), &bad_wr) == 0);
+            if (pmem_exec) {
+              e_assert(ibv_post_recv(resource[wid].handle->qp,
+                                     &resource[wid].rrs->front(),
+                                     &bad_rr) == 0);
+            }
           }
         }
       }
@@ -229,7 +302,7 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
     usleep(1000000);
     timeval now_time;
     gettimeofday(&now_time, nullptr);
-    uint64_t c = vector_sum(complete_cnt, c) - last_c;
+    uint64_t c = vector_sum(complete_cnt, .c) - last_c;
     uint64_t diff = timeval_diff(now_time, last_time);
     result.cnt_duration.push_back(c);
     fprintf(stdout, "Thoughput: %f Mops\n", 1.0 * c / diff);
@@ -244,7 +317,7 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
 
   uint64_t diff = timeval_diff(end_time, start_time);
 
-  result.cnt = vector_sum(complete_cnt, c);
+  result.cnt = vector_sum(complete_cnt, .c);
   result.avg_latency_us = 1.0 * diff / result.cnt;
   result.avg_throughput_Mops = 1.0 * result.cnt / diff;
 

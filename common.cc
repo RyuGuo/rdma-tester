@@ -1,13 +1,14 @@
 #include "common.h"
+#include <libpmem.h>
 
- uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size,
-                                  size_t payload) {
+uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size, size_t payload) {
   return mr_addr + rand() % (mr_size - payload);
 }
 
 void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           uint8_t gid_idx, int num_thread, bool thread_local_cq,
-                          int cqe_depth, size_t mr_size) {
+                          int cqe_depth, size_t mr_size,
+                          std::string &pmem_dev_path, bool *is_pmemp) {
   // open device and port
   ib_stat.device_list = ibv_get_device_list(&ib_stat.num_devices);
   e_assert(ib_stat.device_list != nullptr);
@@ -30,7 +31,19 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
   }
 
   // create mr
-  void *_mr = malloc(mr_size);
+  void *_mr;
+  if (pmem_dev_path.size() == 0) {
+    _mr = malloc(mr_size);
+    *is_pmemp = false;
+  } else {
+    size_t mapped_len = 0;
+    int is_pmem = 0;
+    _mr = pmem_map_file(pmem_dev_path.c_str(), 0, PMEM_FILE_CREATE, 0600,
+                        &mapped_len, &is_pmem);
+    e_assert(is_pmem == 1);
+    e_assert(mapped_len >= mr_size);
+    *is_pmemp = true;
+  }
   e_assert(_mr != nullptr);
   memset(_mr, 0, mr_size);
   ib_stat.mr = ibv_reg_mr(ib_stat.pd, _mr, mr_size, ACCESS_FLAGS);
@@ -72,7 +85,7 @@ void qp_rtr_rts(QPHandle *handle, ib_stat_s &ib_stat, uint8_t ib_port) {
   ibv_qp_attr qp_attr;
   clr_obj(qp_attr);
   qp_attr.qp_state = IBV_QPS_RTR;
-  qp_attr.path_mtu = IBV_MTU_256;
+  qp_attr.path_mtu = IBV_MTU_512;
   qp_attr.ah_attr.dlid = handle->remote.lid;
   qp_attr.ah_attr.port_num = ib_port;
   qp_attr.dest_qp_num = handle->remote.qp_num;

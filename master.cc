@@ -3,26 +3,31 @@
 #include <arpa/inet.h>
 #include <cassert>
 #include <infiniband/verbs.h>
+#include <libpmem.h>
 #include <pthread.h>
+#include <x86intrin.h>
+#include <xmmintrin.h>
 
 using namespace std;
 
-static vector<ibv_recv_wr> wrs;
+static vector<ibv_recv_wr> rrs;
 static vector<ibv_sge> sges;
 
 static void ready_for_recv_resource(MasterContext &ctx) {
-  wrs.resize(ctx.option.max_recv_wr);
+  rrs.resize(ctx.option.max_recv_wr);
   sges.resize(ctx.option.max_recv_wr);
 
   for (int i = 0; i < ctx.option.max_recv_wr; ++i) {
+    // align of 64B
     sges[i].addr = rand_pick_mr_addr((uint64_t)ctx.ib_stat.mr->addr,
-                                     ctx.ib_stat.mr->length, ctx.max_payload);
+                                     ctx.ib_stat.mr->length, ctx.max_payload) &
+                   ~0x3fUL;
     sges[i].length = ctx.max_payload;
     sges[i].lkey = ctx.ib_stat.mr->lkey;
-    wrs[i].sg_list = &sges[i];
-    wrs[i].num_sge = 1;
-    wrs[i].next = nullptr;
-    wrs[i].wr_id = i;
+    rrs[i].sg_list = &sges[i];
+    rrs[i].num_sge = 1;
+    rrs[i].next = nullptr;
+    rrs[i].wr_id = i;
   }
 }
 
@@ -65,7 +70,8 @@ static void rdma_connect_listener(MasterContext &ctx) {
         handle->remote = buf.info;
 
         // connect local qp
-        int cqid = rand() % ctx.ib_stat.cqs.size();
+        static int cqid_gen = 0;
+        int cqid = (cqid_gen++) % ctx.ib_stat.cqs.size();
         handle->cqid = cqid;
         handle->qp = create_qp(ctx.ib_stat, cqid, ctx.option.max_send_wr,
                                ctx.option.max_recv_wr, ctx.option.max_send_sge,
@@ -83,6 +89,7 @@ static void rdma_connect_listener(MasterContext &ctx) {
             .lid = ctx.ib_stat.port_attr.lid,
             .gid_idx = ctx.option.gid_idx,
             .rkey = ctx.ib_stat.mr->rkey,
+            .is_pmem = ctx.use_pmem,
         };
 
         buf.type = QPConnectBufferStructure::INFO;
@@ -95,8 +102,8 @@ static void rdma_connect_listener(MasterContext &ctx) {
         ctx.handle_map.insert(make_pair(handle->qp->qp_num, handle));
       } else if (buf.type == QPConnectBufferStructure::COMPLETE) {
         ctx.max_payload = max(ctx.max_payload, buf.payload);
-        
-        if (ctx.poll_sync_barrier) {
+
+        if (ctx.ready_for_resource) {
           ready_for_recv_resource(ctx);
         }
 
@@ -104,14 +111,14 @@ static void rdma_connect_listener(MasterContext &ctx) {
         ibv_recv_wr *bad_wr;
         for (int i = 0; i < ctx.option.num_recv_wr_per_qp; ++i) {
           if (ctx.option.use_srq)
-            assert(ibv_post_srq_recv(ctx.ib_stat.srq, &wrs[rand() % wrs.size()],
+            assert(ibv_post_srq_recv(ctx.ib_stat.srq, &rrs[rand() % rrs.size()],
                                      &bad_wr) == 0);
           else
             assert(ibv_post_recv(ctx.handles.back()->qp,
-                                 &wrs[rand() % wrs.size()], &bad_wr) == 0);
+                                 &rrs[rand() % rrs.size()], &bad_wr) == 0);
         }
         close(sockfd);
-        ctx.poll_sync_barrier = false;
+        ctx.ready_for_resource = false;
         break;
       }
     }
@@ -122,11 +129,15 @@ static void rdma_connect_listener(MasterContext &ctx) {
 
 static void poll_worker(MasterContext &ctx, int tid) {
   ibv_wc *wcs = new ibv_wc[ctx.option.num_poll_entries];
-  ibv_recv_wr *bad_wr;
+  ibv_send_wr wr;
+  clr_obj(wr);
+  wr.num_sge = 0;
+  wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+  wr.send_flags = IBV_SEND_SIGNALED;
+  ibv_send_wr *bad_wr;
+  ibv_recv_wr *bad_rr;
 
   // sync point
-  while (ctx.poll_sync_barrier) {
-  }
 
   while (ctx.alive) {
     int n = ibv_poll_cq(ctx.ib_stat.cqs[tid % ctx.ib_stat.cqs.size()],
@@ -135,12 +146,28 @@ static void poll_worker(MasterContext &ctx, int tid) {
       if (wcs[i].status != IBV_WC_SUCCESS) {
         fprintf(stderr, "Poll CQ Error: status: %d\n", wcs[i].status);
       } else {
+        if ((wcs[i].opcode & IBV_WC_RECV) == 0) {
+          continue;
+        }
+        if (ctx.use_pmem) {
+          void *clp;
+          if (wcs[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+            clp = (void *)((uint64_t)ctx.ib_stat.mr->addr + wcs[i].imm_data);
+          } else {
+            clp = (void *)rrs[wcs[i].wr_id].sg_list->addr;
+          }
+          pmem_persist(clp, wcs[i].byte_len);
+          // repeat reply
+          wr.imm_data = wcs[i].qp_num;
+          e_assert(ibv_post_send(ctx.handle_map[wcs[i].qp_num]->qp, &wr,
+                                 &bad_wr) == 0);
+        }
         if (ctx.option.use_srq)
-          assert(ibv_post_srq_recv(ctx.ib_stat.srq, &wrs[wcs[i].wr_id],
-                                   &bad_wr) == 0);
+          e_assert(ibv_post_srq_recv(ctx.ib_stat.srq, &rrs[wcs[i].wr_id],
+                                     &bad_rr) == 0);
         else
-          assert(ibv_post_recv(ctx.handle_map[wcs[i].qp_num]->qp,
-                               &wrs[wcs[i].wr_id], &bad_wr) == 0);
+          e_assert(ibv_post_recv(ctx.handle_map[wcs[i].qp_num]->qp,
+                                 &rrs[wcs[i].wr_id], &bad_rr) == 0);
       }
     }
   }
@@ -149,13 +176,13 @@ static void poll_worker(MasterContext &ctx, int tid) {
 }
 
 MasterContext::MasterContext(MasterOption &option)
-    : option(option), poll_sync_barrier(true) {
+    : option(option), ready_for_resource(true) {
   srand(time(nullptr));
 
   open_device_and_port(ib_stat, option.device_id, option.ib_port,
                        option.gid_idx, option.num_thread,
-                       option.thread_local_cq, option.cqe_depth,
-                       option.mr_size);
+                       option.thread_local_cq, option.cqe_depth, option.mr_size,
+                       option.pmem_dev_path, &use_pmem);
 
   // create srq
   if (option.use_srq) {
