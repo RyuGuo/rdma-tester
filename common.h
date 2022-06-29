@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <errno.h>
 #include <infiniband/verbs.h>
+#include <libpmem.h>
 #include <mutex>
 #include <pthread.h>
 #include <string.h>

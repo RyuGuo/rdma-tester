@@ -1,12 +1,4 @@
 #include "common.h"
-#include <algorithm>
-#include <arpa/inet.h>
-#include <cassert>
-#include <infiniband/verbs.h>
-#include <libpmem.h>
-#include <pthread.h>
-#include <x86intrin.h>
-#include <xmmintrin.h>
 
 using namespace std;
 

@@ -1,10 +1,4 @@
 #include "common.h"
-#include <cstdlib>
-#include <infiniband/verbs.h>
-#include <pthread.h>
-#include <sys/select.h>
-#include <unistd.h>
-#include <unordered_map>
 
 using namespace std;
 
