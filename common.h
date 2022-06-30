@@ -43,6 +43,7 @@ struct MasterOption {
   int num_recv_wr_per_qp = 4;
   std::string pmem_dev_path;
 
+  bool use_dm = false;
   bool use_ddio = true;
 
   bool use_srq = true;
@@ -69,6 +70,7 @@ struct ClientOption {
   size_t payload = 64;
   std::string pmem_dev_path;
 
+  bool use_dm = false;
   bool use_ddio = true;
 
   int num_thread = 1;
@@ -94,7 +96,6 @@ struct TestOption {
   TestType type;
   uint32_t duration_s = 10;
   int post_list = 1;
-  size_t payload = 64;
 };
 
 struct TestResult {
@@ -138,7 +139,7 @@ struct QPConnectBufferStructure {
       return sizeof(*this);
       break;
     case COMPLETE:
-      return sizeof(type);
+      return sizeof(type) + sizeof(payload);
       break;
     }
     return 0;
@@ -148,7 +149,7 @@ struct QPConnectBufferStructure {
 struct ib_stat_s {
   int num_devices;
   ibv_device **device_list;
-  ibv_device_attr device_attr;
+  ibv_device_attr_ex device_attr_ex;
   ibv_context *ib_ctx;
   ibv_port_attr port_attr;
   ibv_gid gid;
@@ -196,6 +197,7 @@ struct ClientContext {
   (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ | \
    IBV_ACCESS_REMOTE_ATOMIC)
 
+#define align_up(a, u) (((a) + (u)-1) / (u) * (u))
 #define clr_obj(o) memset(&o, 0, sizeof(o))
 #define e_assert(expr)                                                         \
   (static_cast<bool>(expr) ? void(0) : ({                                      \
@@ -212,12 +214,14 @@ struct ClientContext {
     sum;                                                                       \
   })
 
-#define assert_eq(a, b, f)                                                     \
-  (static_cast<bool>((a) == (b)) ? void(0) : ({                                \
+#define assert_expr(a, op, b, f)                                               \
+  (static_cast<bool>((a)op(b)) ? void(0) : ({                                  \
     fprintf(stdout, "%s: " #a " = " f ", " #b " = " f "\n", strerror(errno),   \
             a, b);                                                             \
-    __assert_fail(#a " == " #b, __FILE__, __LINE__, __ASSERT_FUNCTION);        \
+    __assert_fail(#a " " #op " " #b, __FILE__, __LINE__, __ASSERT_FUNCTION);   \
   }))
+
+#define assert_eq(a, b, f) assert_expr(a, ==, b, f)
 
 template <typename T> std::vector<T> flat(std::vector<std::vector<T>> &v) {
   std::vector<T> r;
@@ -230,7 +234,8 @@ template <typename T> std::vector<T> flat(std::vector<std::vector<T>> &v) {
 void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           uint8_t gid_idx, int num_thread, bool thread_local_cq,
                           int cqe_depth, size_t mr_size,
-                          std::string &pmem_dev_path, bool *is_pmemp);
+                          std::string &pmem_dev_path, bool *is_pmemp,
+                          bool use_dm);
 
 ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,
                   uint32_t max_recv_wr, uint32_t max_send_sge,

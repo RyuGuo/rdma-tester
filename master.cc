@@ -169,13 +169,13 @@ static void poll_worker(MasterContext &ctx, int tid) {
 }
 
 MasterContext::MasterContext(MasterOption &option)
-    : option(option), ready_for_resource(true) {
+    : option(option), ready_for_resource(true), max_payload(0) {
   srand(time(nullptr));
 
   open_device_and_port(ib_stat, option.device_id, option.ib_port,
                        option.gid_idx, option.num_thread,
                        option.thread_local_cq, option.cqe_depth, option.mr_size,
-                       option.pmem_dev_path, &use_pmem);
+                       option.pmem_dev_path, &use_pmem, option.use_dm);
 
   // create srq
   if (option.use_srq) {

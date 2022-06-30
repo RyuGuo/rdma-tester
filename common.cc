@@ -1,4 +1,6 @@
 #include "common.h"
+#include <cstdlib>
+#include <infiniband/verbs.h>
 
 uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size, size_t payload) {
   return mr_addr + rand() % (mr_size - payload);
@@ -7,14 +9,18 @@ uint64_t rand_pick_mr_addr(uint64_t mr_addr, size_t mr_size, size_t payload) {
 void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           uint8_t gid_idx, int num_thread, bool thread_local_cq,
                           int cqe_depth, size_t mr_size,
-                          std::string &pmem_dev_path, bool *is_pmemp) {
+                          std::string &pmem_dev_path, bool *is_pmemp,
+                          bool use_dm) {
   // open device and port
+  ibv_query_device_ex_input input;
+  input.comp_mask = 0;
   ib_stat.device_list = ibv_get_device_list(&ib_stat.num_devices);
   e_assert(ib_stat.device_list != nullptr);
   e_assert(ib_stat.num_devices > 0);
   ib_stat.ib_ctx = ibv_open_device(ib_stat.device_list[device_id]);
-  e_assert(ibv_query_device(ib_stat.ib_ctx, &ib_stat.device_attr) == 0);
   e_assert(ib_stat.ib_ctx != nullptr);
+  e_assert(ibv_query_device_ex(ib_stat.ib_ctx, &input,
+                               &ib_stat.device_attr_ex) == 0);
   e_assert(ibv_query_port(ib_stat.ib_ctx, ib_port, &ib_stat.port_attr) == 0);
   e_assert(ibv_query_gid(ib_stat.ib_ctx, ib_port, gid_idx, &ib_stat.gid) == 0);
 
@@ -31,27 +37,40 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
 
   // create mr
   void *_mr;
-#ifndef USE_PMEM
-  _mr = malloc(mr_size);
-  *is_pmemp = false;
-#else
-  if (pmem_dev_path.size() == 0) {
-    _mr = malloc(mr_size);
+  if (use_dm) {
+    assert_expr(mr_size, <=, ib_stat.device_attr_ex.max_dm_size, "%lu");
+    ibv_alloc_dm_attr dm_attr;
+    clr_obj(dm_attr);
+    dm_attr.length = mr_size;
+    dm_attr.log_align_req = 3;
+    ibv_dm *dm = ibv_alloc_dm(ib_stat.ib_ctx, &dm_attr);
+    e_assert(dm != nullptr);
+    ib_stat.mr = ibv_reg_dm_mr(ib_stat.pd, dm, 0, mr_size, ACCESS_FLAGS | IBV_ACCESS_ZERO_BASED);
+    e_assert(ib_stat.mr != nullptr);
     *is_pmemp = false;
   } else {
-    size_t mapped_len = 0;
-    int is_pmem = 0;
-    _mr = pmem_map_file(pmem_dev_path.c_str(), 0, PMEM_FILE_CREATE, 0600,
-                        &mapped_len, &is_pmem);
-    e_assert(is_pmem == 1);
-    e_assert(mapped_len >= mr_size);
-    *is_pmemp = true;
-  }
+#ifndef USE_PMEM
+    _mr = aligned_alloc(4096, mr_size);
+    *is_pmemp = false;
+#else
+    if (pmem_dev_path.size() == 0) {
+      _mr = malloc(mr_size);
+      *is_pmemp = false;
+    } else {
+      size_t mapped_len = 0;
+      int is_pmem = 0;
+      _mr = pmem_map_file(pmem_dev_path.c_str(), 0, PMEM_FILE_CREATE, 0600,
+                          &mapped_len, &is_pmem);
+      e_assert(is_pmem == 1);
+      e_assert(mapped_len >= mr_size);
+      *is_pmemp = true;
+    }
 #endif // USE_PMEM
-  e_assert(_mr != nullptr);
-  memset(_mr, 0, mr_size);
-  ib_stat.mr = ibv_reg_mr(ib_stat.pd, _mr, mr_size, ACCESS_FLAGS);
-  e_assert(ib_stat.mr != nullptr);
+    e_assert(_mr != nullptr);
+    memset(_mr, 0, mr_size);
+    ib_stat.mr = ibv_reg_mr(ib_stat.pd, _mr, mr_size, ACCESS_FLAGS);
+    e_assert(ib_stat.mr != nullptr);
+  }
 }
 
 ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,

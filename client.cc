@@ -8,7 +8,7 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
   open_device_and_port(ib_stat, option.device_id, option.ib_port,
                        option.gid_idx, option.num_thread,
                        option.thread_local_cq, option.cqe_depth, option.mr_size,
-                       option.pmem_dev_path, &use_pmem);
+                       option.pmem_dev_path, &use_pmem, option.use_dm);
 
   // connect to masters
   num_remote = option.master_ip.size();
@@ -126,8 +126,8 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
       clr_obj(wr);
       clr_obj(rr);
       sge.addr = rand_pick_mr_addr((uint64_t)ctx->ib_stat.mr->addr,
-                                   ctx->ib_stat.mr->length, option.payload);
-      sge.length = option.payload;
+                                   ctx->ib_stat.mr->length, ctx->option.payload);
+      sge.length = ctx->option.payload;
       sge.lkey = ctx->ib_stat.mr->lkey;
       wr.sg_list = &sge;
       wr.num_sge = 1;
@@ -135,7 +135,7 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
       wr.wr.rdma = {
           .remote_addr = rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
                                            ctx->handles[i]->remote.mr_size,
-                                           option.payload),
+                                           ctx->option.payload),
           .rkey = ctx->handles[i]->remote.rkey,
       };
 
@@ -159,23 +159,19 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
         case TestOption::CAS:
           wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
           wr.wr.atomic.remote_addr =
-              rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
-                                ctx->handles[i]->remote.mr_size,
-                                option.payload) &
-              ~0x7UL;
+              align_up(ctx->handles[i]->remote.mr_addr, 8);
           wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
           wr.wr.atomic.compare_add = 0;
           wr.wr.atomic.swap = 0;
+          sge.length = 8;
           break;
         case TestOption::FETCH_ADD:
           wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
           wr.wr.atomic.remote_addr =
-              rand_pick_mr_addr(ctx->handles[i]->remote.mr_addr,
-                                ctx->handles[i]->remote.mr_size,
-                                option.payload) &
-              ~0x7UL;
+              align_up(ctx->handles[i]->remote.mr_addr, 8);
           wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
           wr.wr.atomic.compare_add = 1;
+          sge.length = 8;
           break;
         default:
           fprintf(stderr, "Invalid Test Type: %d\n", option.type);

@@ -19,6 +19,8 @@ int main(int argc, char *argv[]) {
     MasterOption option;
     option.num_recv_wr_per_qp = 32;
     option.num_thread = 1;
+    option.use_dm = false;
+    option.mr_size = 4L << 10;
 #ifdef USE_PMEM
     option.pmem_dev_path = "/dev/dax0.0";
 #endif // USE_PMEM
@@ -29,15 +31,15 @@ int main(int argc, char *argv[]) {
     ClientOption option;
     option.device_id = 1;
     option.num_qp_per_mac = 4;
-    option.num_thread = 4;
+    option.num_thread = 1;
+    option.payload = 256;
     for (int i = 1; i < argc; ++i) {
       option.master_ip.push_back(argv[i]);
     }
     ClientContext *ctx = new ClientContext(option);
 
     TestOption test_option;
-    test_option.post_list = 8;
-    test_option.payload = 256;
+    test_option.post_list = 1;
     TestResult result;
 
     test_option.type = TestOption::READ;
