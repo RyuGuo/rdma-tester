@@ -12,4 +12,26 @@ For master: `./rdma_test`
 
 For client: `./rdma_test <master_ip> ...`
 
-We also provide **persistent memory** and **MPI** test. You can use/unuse their macro to open/close these features.
+## Feature
+
+* Multiple Master Test
+
+  string[] `ClientOption::master_ip`
+
+* Persistent Memory
+
+  macro `-DUSE_PMEM`
+
+  string `Option::pmem_dev_path`
+  
+* DDIO
+
+  bool `Option::use_ddio`
+
+* RDMA NIC Device Memory
+
+  bool `Option::use_dm`
+
+* MPI
+
+  macro `-DUSE_MPI`
