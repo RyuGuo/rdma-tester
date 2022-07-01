@@ -31,9 +31,9 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
       static int cqid_gen = 0;
       int cqid = (cqid_gen++) % ib_stat.cqs.size();
       handle->cqid = cqid;
-      handle->qp =
-          create_qp(ib_stat, cqid, option.max_send_wr, option.max_recv_wr,
-                    option.max_send_sge, option.max_recv_sge);
+      handle->qp = create_qp(ib_stat, cqid, option.qp_type, option.max_send_wr,
+                             option.max_recv_wr, option.max_send_sge,
+                             option.max_recv_sge);
 
       qp_init(handle, option.ib_port);
 
@@ -45,7 +45,9 @@ ClientContext::ClientContext(ClientOption &option) : option(option) {
           .qp_num = handle->qp->qp_num,
           .lid = ib_stat.port_attr.lid,
           .gid_idx = option.gid_idx,
+          .qkey = QKEY,
           .rkey = ib_stat.mr->rkey,
+          .qp_type = option.qp_type,
           .is_pmem = use_pmem,
           .use_ddio = option.use_ddio,
       };
@@ -103,6 +105,10 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
   vector<vector<ibv_send_wr>> v_wr(ctx->handles.size());
   // rr [handle][rr list]
   vector<vector<ibv_recv_wr>> v_rr(ctx->handles.size());
+
+  ibv_ah_attr ah_attr;
+  ibv_ah *ah = ibv_create_ah(ctx->ib_stat.pd, &ah_attr);
+
   for (int i = 0; i < ctx->handles.size(); ++i) {
     auto &sges = v_sge[i];
     auto &wrs = v_wr[i];
@@ -110,7 +116,8 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
     sges.resize(option.post_list);
     wrs.resize(option.post_list);
     rrs.resize(option.post_list);
-    if (!ctx->handles[i]->remote.use_ddio) {
+
+    if (!ctx->handles[i]->remote.use_ddio && ctx->handles[i]->remote.is_pmem) {
       wrs.resize(option.post_list + 1);
       auto &wrb = wrs.back();
       clr_obj(wrb);
@@ -125,8 +132,9 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
       clr_obj(sge);
       clr_obj(wr);
       clr_obj(rr);
-      sge.addr = rand_pick_mr_addr((uint64_t)ctx->ib_stat.mr->addr,
-                                   ctx->ib_stat.mr->length, ctx->option.payload);
+      sge.addr =
+          rand_pick_mr_addr((uint64_t)ctx->ib_stat.mr->addr,
+                            ctx->ib_stat.mr->length, ctx->option.payload);
       sge.length = ctx->option.payload;
       sge.lkey = ctx->ib_stat.mr->lkey;
       wr.sg_list = &sge;
@@ -142,56 +150,75 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
       rr.num_sge = 0;
       rr.next = &rrs[j + 1];
 
-      if (!ctx->handles[i]->remote.is_pmem) {
-        switch (option.type) {
-        case TestOption::WRITE:
-          wr.opcode = IBV_WR_RDMA_WRITE;
-          break;
-        case TestOption::WRITE_WITH_IMM:
-          wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-          break;
-        case TestOption::READ:
-          wr.opcode = IBV_WR_RDMA_READ;
-          break;
-        case TestOption::SEND:
-          wr.opcode = IBV_WR_SEND;
-          break;
-        case TestOption::CAS:
-          wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
-          wr.wr.atomic.remote_addr =
-              align_up(ctx->handles[i]->remote.mr_addr, 8);
-          wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
-          wr.wr.atomic.compare_add = 0;
-          wr.wr.atomic.swap = 0;
-          sge.length = 8;
-          break;
-        case TestOption::FETCH_ADD:
-          wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
-          wr.wr.atomic.remote_addr =
-              align_up(ctx->handles[i]->remote.mr_addr, 8);
-          wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
-          wr.wr.atomic.compare_add = 1;
-          sge.length = 8;
-          break;
-        default:
-          fprintf(stderr, "Invalid Test Type: %d\n", option.type);
-          exit(1);
+      if (ctx->option.qp_type == RC) {
+        // RC
+        if (!ctx->handles[i]->remote.is_pmem) {
+          switch (option.type) {
+          case TestOption::WRITE:
+            wr.opcode = IBV_WR_RDMA_WRITE;
+            break;
+          case TestOption::WRITE_WITH_IMM:
+            wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+            break;
+          case TestOption::READ:
+            wr.opcode = IBV_WR_RDMA_READ;
+            break;
+          case TestOption::SEND:
+            wr.opcode = IBV_WR_SEND;
+            break;
+          case TestOption::CAS:
+            wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
+            wr.wr.atomic.remote_addr =
+                align_up(ctx->handles[i]->remote.mr_addr, 8);
+            wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
+            wr.wr.atomic.compare_add = 0;
+            wr.wr.atomic.swap = 0;
+            sge.length = 8;
+            break;
+          case TestOption::FETCH_ADD:
+            wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+            wr.wr.atomic.remote_addr =
+                align_up(ctx->handles[i]->remote.mr_addr, 8);
+            wr.wr.atomic.rkey = ctx->handles[i]->remote.rkey;
+            wr.wr.atomic.compare_add = 1;
+            sge.length = 8;
+            break;
+          default:
+            fprintf(stderr, "Invalid Test Type: %d\n", option.type);
+            exit(1);
+          }
+        } else {
+          switch (option.type) {
+          case TestOption::WRITE_WITH_IMM:
+            wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+            // align of 64B
+            wr.wr.rdma.remote_addr &= ~0x3fUL;
+            // write offset
+            wr.imm_data =
+                wr.wr.rdma.remote_addr - ctx->handles[i]->remote.mr_addr;
+            break;
+          case TestOption::READ:
+            wr.opcode = IBV_WR_RDMA_READ;
+            break;
+          case TestOption::SEND:
+            wr.opcode = IBV_WR_SEND;
+            break;
+          case TestOption::WRITE:
+            if (!ctx->option.use_ddio)
+              break;
+          default:
+            fprintf(stderr, "Invalid Test Type: %d\n", option.type);
+            exit(1);
+          }
         }
       } else {
+        // UD
         switch (option.type) {
-        case TestOption::WRITE_WITH_IMM:
-          wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-          // align of 64B
-          wr.wr.rdma.remote_addr &= ~0x3fUL;
-          // write offset
-          wr.imm_data =
-              wr.wr.rdma.remote_addr - ctx->handles[i]->remote.mr_addr;
-          break;
-        case TestOption::READ:
-          wr.opcode = IBV_WR_RDMA_READ;
-          break;
         case TestOption::SEND:
           wr.opcode = IBV_WR_SEND;
+          wr.wr.ud.ah = ctx->handles[i]->ah;
+          wr.wr.ud.remote_qkey = ctx->handles[i]->remote.qkey;
+          wr.wr.ud.remote_qpn = ctx->handles[i]->remote.qp_num;
           break;
         default:
           fprintf(stderr, "Invalid Test Type: %d\n", option.type);
@@ -255,6 +282,7 @@ TestResult start_test(ClientContext *ctx, TestOption &option) {
                                  &resource[i].rrs->front(), &bad_rr) == 0);
         }
       }
+
       while (!test_over) {
         int n = ibv_poll_cq(ctx->ib_stat.cqs[cqid],
                             ctx->option.num_poll_entries, wcs);

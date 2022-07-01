@@ -28,6 +28,8 @@
 
 #define DEFAULT_PORT 8989
 
+enum QPType { RC, UD };
+
 struct MasterOption {
   uint16_t port = DEFAULT_PORT;
 
@@ -60,6 +62,8 @@ struct MasterOption {
 struct ClientOption {
   std::vector<std::string> master_ip;
   uint16_t port = DEFAULT_PORT;
+
+  QPType qp_type = RC;
 
   int device_id = 0;
   uint8_t ib_port = 1;
@@ -117,13 +121,17 @@ struct QPHandle {
     uint32_t qp_num;
     uint16_t lid;
     uint8_t gid_idx;
+    uint32_t qkey;
     uint32_t rkey;
+    QPType qp_type;
     bool is_pmem;
     bool use_ddio;
   };
 
   peer_info_s local;
   peer_info_s remote;
+
+  ibv_ah *ah;
 };
 
 struct QPConnectBufferStructure {
@@ -157,6 +165,7 @@ struct ib_stat_s {
   ibv_mr *mr;
   ibv_srq *srq;
   std::vector<ibv_cq *> cqs;
+  ibv_qp *ud_recv_qp = nullptr;
 };
 
 struct MasterContext {
@@ -193,6 +202,7 @@ struct ClientContext {
 };
 
 #define PSN 0
+#define QKEY 0x111
 #define ACCESS_FLAGS                                                           \
   (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ | \
    IBV_ACCESS_REMOTE_ATOMIC)
@@ -237,9 +247,9 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
                           std::string &pmem_dev_path, bool *is_pmemp,
                           bool use_dm);
 
-ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,
-                  uint32_t max_recv_wr, uint32_t max_send_sge,
-                  uint32_t max_recv_sge);
+ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid,QPType qp_type,
+                  uint32_t max_send_wr, uint32_t max_recv_wr,
+                  uint32_t max_send_sge, uint32_t max_recv_sge);
 void qp_init(QPHandle *handle, uint8_t ib_port);
 void qp_rtr_rts(QPHandle *handle, ib_stat_s &ib_stat, uint8_t ib_port);
 

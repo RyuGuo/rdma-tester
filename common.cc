@@ -45,7 +45,8 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
     dm_attr.log_align_req = 3;
     ibv_dm *dm = ibv_alloc_dm(ib_stat.ib_ctx, &dm_attr);
     e_assert(dm != nullptr);
-    ib_stat.mr = ibv_reg_dm_mr(ib_stat.pd, dm, 0, mr_size, ACCESS_FLAGS | IBV_ACCESS_ZERO_BASED);
+    ib_stat.mr = ibv_reg_dm_mr(ib_stat.pd, dm, 0, mr_size,
+                               ACCESS_FLAGS | IBV_ACCESS_ZERO_BASED);
     e_assert(ib_stat.mr != nullptr);
     *is_pmemp = false;
   } else {
@@ -73,12 +74,12 @@ void open_device_and_port(ib_stat_s &ib_stat, int device_id, uint8_t ib_port,
   }
 }
 
-ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, uint32_t max_send_wr,
-                  uint32_t max_recv_wr, uint32_t max_send_sge,
-                  uint32_t max_recv_sge) {
+ibv_qp *create_qp(ib_stat_s &ib_stat, int cqid, QPType qp_type,
+                  uint32_t max_send_wr, uint32_t max_recv_wr,
+                  uint32_t max_send_sge, uint32_t max_recv_sge) {
   ibv_qp_init_attr qp_init_attr;
   clr_obj(qp_init_attr);
-  qp_init_attr.qp_type = IBV_QPT_RC;
+  qp_init_attr.qp_type = (qp_type == RC) ? IBV_QPT_RC : IBV_QPT_UD;
   qp_init_attr.sq_sig_all = 0;
   qp_init_attr.cap.max_send_wr = max_send_wr;
   qp_init_attr.cap.max_recv_wr = max_recv_wr;
@@ -98,46 +99,87 @@ void qp_init(QPHandle *handle, uint8_t ib_port) {
   qp_attr.qp_state = IBV_QPS_INIT;
   qp_attr.pkey_index = 0;
   qp_attr.port_num = ib_port;
-  qp_attr.qp_access_flags = ACCESS_FLAGS;
-  e_assert(ibv_modify_qp(handle->qp, &qp_attr,
-                         IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
-                             IBV_QP_ACCESS_FLAGS) == 0);
+
+  switch (handle->qp->qp_type) {
+  case IBV_QPT_RC:
+    qp_attr.qp_access_flags = ACCESS_FLAGS;
+    e_assert(ibv_modify_qp(handle->qp, &qp_attr,
+                           IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
+                               IBV_QP_ACCESS_FLAGS) == 0);
+    break;
+  case IBV_QPT_UD:
+    qp_attr.qkey = QKEY;
+    e_assert(ibv_modify_qp(handle->qp, &qp_attr,
+                           IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_QKEY |
+                               IBV_QP_PORT) == 0);
+    break;
+  default:
+    fprintf(stderr, "Invalid QP Type: %d\n", handle->qp->qp_type);
+    exit(1);
+  }
 }
 
 void qp_rtr_rts(QPHandle *handle, ib_stat_s &ib_stat, uint8_t ib_port) {
   ibv_qp_attr qp_attr;
+  ibv_ah_attr ah_attr;
   clr_obj(qp_attr);
-  qp_attr.qp_state = IBV_QPS_RTR;
-  qp_attr.path_mtu = IBV_MTU_512;
-  qp_attr.ah_attr.dlid = handle->remote.lid;
-  qp_attr.ah_attr.port_num = ib_port;
-  qp_attr.dest_qp_num = handle->remote.qp_num;
-  qp_attr.rq_psn = PSN;
-  qp_attr.min_rnr_timer = 12;
-  qp_attr.max_dest_rd_atomic = 8;
-  if (ib_stat.port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
-    qp_attr.ah_attr.is_global = true; // ROCE
-    qp_attr.ah_attr.grh.dgid = handle->remote.gid;
-    qp_attr.ah_attr.grh.flow_label = 0;
-    qp_attr.ah_attr.grh.hop_limit = 1;
-    qp_attr.ah_attr.grh.sgid_index = handle->remote.gid_idx;
-    qp_attr.ah_attr.grh.traffic_class = 0;
-  }
-  e_assert(ibv_modify_qp(handle->qp, &qp_attr,
-                         IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_AV |
-                             IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
-                             IBV_QP_MAX_DEST_RD_ATOMIC |
-                             IBV_QP_MIN_RNR_TIMER) == 0);
+  clr_obj(ah_attr);
 
-  clr_obj(qp_attr);
-  qp_attr.qp_state = IBV_QPS_RTS;
-  qp_attr.timeout = 14;
-  qp_attr.retry_cnt = 7;
-  qp_attr.rnr_retry = 7;
-  qp_attr.sq_psn = PSN;
-  qp_attr.max_rd_atomic = 8;
-  e_assert(ibv_modify_qp(handle->qp, &qp_attr,
-                         IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
-                             IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
-                             IBV_QP_MAX_QP_RD_ATOMIC) == 0);
+  ah_attr.dlid = handle->remote.lid;
+  ah_attr.port_num = ib_port;
+  if (ib_stat.port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+    ah_attr.is_global = true; // RoCE
+    ah_attr.grh.dgid = handle->remote.gid;
+    ah_attr.grh.flow_label = 0;
+    ah_attr.grh.hop_limit = 1;
+    ah_attr.grh.sgid_index = handle->remote.gid_idx;
+    ah_attr.grh.traffic_class = 0;
+  }
+
+  switch (handle->qp->qp_type) {
+  case IBV_QPT_RC:
+    qp_attr.qp_state = IBV_QPS_RTR;
+    qp_attr.path_mtu = IBV_MTU_512;
+    qp_attr.dest_qp_num = handle->remote.qp_num;
+    qp_attr.rq_psn = PSN;
+    qp_attr.min_rnr_timer = 12;
+    qp_attr.max_dest_rd_atomic = 8;
+    qp_attr.ah_attr = ah_attr;
+    e_assert(ibv_modify_qp(handle->qp, &qp_attr,
+                           IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_AV |
+                               IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
+                               IBV_QP_MAX_DEST_RD_ATOMIC |
+                               IBV_QP_MIN_RNR_TIMER) == 0);
+
+    clr_obj(qp_attr);
+    qp_attr.qp_state = IBV_QPS_RTS;
+    qp_attr.timeout = 14;
+    qp_attr.retry_cnt = 7;
+    qp_attr.rnr_retry = 7;
+    qp_attr.sq_psn = PSN;
+    qp_attr.max_rd_atomic = 8;
+    e_assert(ibv_modify_qp(handle->qp, &qp_attr,
+                           IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+                               IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
+                               IBV_QP_MAX_QP_RD_ATOMIC) == 0);
+    break;
+  case IBV_QPT_UD:
+    qp_attr.qp_state = IBV_QPS_RTR;
+    qp_attr.path_mtu = IBV_MTU_512;
+
+    e_assert(ibv_modify_qp(handle->qp, &qp_attr, IBV_QP_STATE) == 0);
+
+    clr_obj(qp_attr);
+    qp_attr.qp_state = IBV_QPS_RTS;
+    qp_attr.sq_psn = PSN;
+    e_assert(
+        ibv_modify_qp(handle->qp, &qp_attr, IBV_QP_STATE | IBV_QP_SQ_PSN) == 0);
+
+    handle->ah = ibv_create_ah(handle->qp->pd, &ah_attr);
+    e_assert(handle->ah != nullptr);
+    break;
+  default:
+    fprintf(stderr, "Invalid QP Type: %d\n", handle->qp->qp_type);
+    exit(1);
+  }
 }

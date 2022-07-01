@@ -12,9 +12,11 @@ static void ready_for_recv_resource(MasterContext &ctx) {
   for (int i = 0; i < ctx.option.max_recv_wr; ++i) {
     // align of 64B
     sges[i].addr = rand_pick_mr_addr((uint64_t)ctx.ib_stat.mr->addr,
-                                     ctx.ib_stat.mr->length, ctx.max_payload) &
+                                     ctx.ib_stat.mr->length,
+                                     ctx.max_payload + sizeof(ibv_grh)) &
                    ~0x3fUL;
-    sges[i].length = ctx.max_payload;
+    // UD send buffer need extra grh size (40B)
+    sges[i].length = ctx.max_payload + sizeof(ibv_grh);
     sges[i].lkey = ctx.ib_stat.mr->lkey;
     rrs[i].sg_list = &sges[i];
     rrs[i].num_sge = 1;
@@ -65,12 +67,27 @@ static void rdma_connect_listener(MasterContext &ctx) {
         static int cqid_gen = 0;
         int cqid = (cqid_gen++) % ctx.ib_stat.cqs.size();
         handle->cqid = cqid;
-        handle->qp = create_qp(ctx.ib_stat, cqid, ctx.option.max_send_wr,
-                               ctx.option.max_recv_wr, ctx.option.max_send_sge,
-                               ctx.option.max_recv_sge);
+        if (handle->remote.qp_type == RC) {
+          handle->qp =
+              create_qp(ctx.ib_stat, cqid, RC, ctx.option.max_send_wr,
+                        ctx.option.max_recv_wr, ctx.option.max_send_sge,
+                        ctx.option.max_recv_sge);
 
-        qp_init(handle, ctx.option.ib_port);
-        qp_rtr_rts(handle, ctx.ib_stat, ctx.option.ib_port);
+          qp_init(handle, ctx.option.ib_port);
+          qp_rtr_rts(handle, ctx.ib_stat, ctx.option.ib_port);
+        } else {
+          if (ctx.ib_stat.ud_recv_qp == nullptr) {
+            handle->qp = ctx.ib_stat.ud_recv_qp =
+                create_qp(ctx.ib_stat, cqid, UD, ctx.option.max_send_wr,
+                          ctx.option.max_recv_wr, ctx.option.max_send_sge,
+                          ctx.option.max_recv_sge);
+
+            qp_init(handle, ctx.option.ib_port);
+            qp_rtr_rts(handle, ctx.ib_stat, ctx.option.ib_port);
+          } else {
+            handle->qp = ctx.ib_stat.ud_recv_qp;
+          }
+        }
 
         // send local qp info
         handle->local = {
@@ -80,6 +97,7 @@ static void rdma_connect_listener(MasterContext &ctx) {
             .qp_num = handle->qp->qp_num,
             .lid = ctx.ib_stat.port_attr.lid,
             .gid_idx = ctx.option.gid_idx,
+            .qkey = QKEY,
             .rkey = ctx.ib_stat.mr->rkey,
             .is_pmem = ctx.use_pmem,
             .use_ddio = ctx.option.use_ddio,

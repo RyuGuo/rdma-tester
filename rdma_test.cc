@@ -1,6 +1,8 @@
 #include "common.h"
 
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
 
 using namespace std;
 
@@ -25,13 +27,16 @@ int main(int argc, char *argv[]) {
     option.pmem_dev_path = "/dev/dax0.0";
 #endif // USE_PMEM
     MasterContext *ctx = new MasterContext(option);
-    while (1)
-      ;
+    mutex m;
+    unique_lock<mutex> lock(m);
+    condition_variable cv;
+    cv.wait(lock);
   } else {
     ClientOption option;
+    option.qp_type = RC;
     option.device_id = 1;
     option.num_qp_per_mac = 4;
-    option.num_thread = 1;
+    option.num_thread = 4;
     option.payload = 256;
     for (int i = 1; i < argc; ++i) {
       option.master_ip.push_back(argv[i]);
@@ -116,8 +121,8 @@ int main(int argc, char *argv[]) {
 
     test_option.type = TestOption::FETCH_ADD;
     result = start_test(ctx, test_option);
-    cout << "FETCH_ADD avg latency: " << result.avg_latency_us << " us" << endl;
-    cout << "FETCH_ADD avg throughput: " << result.avg_throughput_Mops
+    cout << "FETCH_ADD avg latency: " << result.avg_latency_us << " us" <<
+    endl; cout << "FETCH_ADD avg throughput: " << result.avg_throughput_Mops
          << " MOPS" << endl;
 
 #ifdef USE_MPI
